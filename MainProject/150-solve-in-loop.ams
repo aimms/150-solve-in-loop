@@ -1,0 +1,212 @@
+## ams_version=1.0
+
+Model Main_Solve_in_Loop {
+	Section Transportation_Problem {
+		DeclarationSection Data_Inputs {
+			Set s_Suppliers {
+				Index: i_Supplier;
+			}
+			Set s_DCs {
+				Index: i_dc;
+			}
+			Parameter p_Supply {
+				IndexDomain: i_Supplier;
+			}
+			Parameter p_Demand {
+				IndexDomain: i_dc;
+			}
+			Parameter p_Distance {
+				IndexDomain: (i_Supplier, i_dc);
+			}
+		}
+		DeclarationSection Transportation_Problem_Formulation {
+			Variable v_Shipments {
+				IndexDomain: (i_Supplier,i_dc);
+				Range: nonnegative;
+			}
+			Variable v_Obj {
+				Range: free;
+				Definition: sum( (i_Supplier, i_dc), p_Distance(i_Supplier, i_dc) * v_Shipments(i_Supplier, i_dc) );
+			}
+			Constraint c_MeetDemand {
+				IndexDomain: i_dc;
+				Definition: sum(i_Supplier, v_Shipments(i_Supplier, i_dc)) >= p_Demand(i_dc);
+			}
+			Constraint c_RespectSupply {
+				IndexDomain: i_Supplier;
+				Definition: sum( i_dc, v_Shipments(i_Supplier, i_dc)) <= p_Supply(i_Supplier);
+			}
+			MathematicalProgram mp_STP {
+				Objective: v_Obj;
+				Direction: minimize;
+				Constraints: AllConstraints;
+				Variables: AllVariables;
+				Type: Automatic;
+			}
+		}
+		Procedure pr_SolveTransportationProblem {
+			Body: {
+				solve mp_STP ;
+			}
+		}
+	}
+	Section Excel_Connection {
+		DeclarationSection Interaction_data {
+			Parameter p_noSup {
+				Comment: "Count number of suppliers in the input Excel sheet";
+			}
+			Parameter p_noDC {
+				Comment: "Count number of DCs in the input Excel file";
+			}
+			StringParameter sp_Workbook;
+		}
+		Procedure pr_ReadDataFromExcelWorkbook {
+			Arguments: (sp_ArgWB);
+			Body: {
+				Empty s_Suppliers, s_DCs ;
+				
+				axll::OpenWorkBook(sp_ArgWB);
+				
+				axll::SelectSheet("Config");
+				axll::ReadSingleValue(p_noSup, "B3");
+				axll::ReadSingleValue(p_noDC,  "B4");
+				
+				axll::SelectSheet("Supply");
+				axll::ReadList(
+					IdentifierReference    :  p_Supply, 
+					RowHeaderRange         :  FormatString("A1:A%i", p_noSup),
+					DataRange              :  FormatString("B1:B%i", p_noSup),
+					ModeForUnknownElements : 1);
+				
+				axll::SelectSheet("Demand");
+				axll::ReadList(
+					IdentifierReference    :  p_Demand, 
+					RowHeaderRange         :  FormatString("A1:A%i", p_noDC),
+					DataRange              :  FormatString("B1:B%i", p_noDC),
+					ModeForUnknownElements : 1);
+				
+				axll::SelectSheet("Dist");
+				
+				axll::ColumnName(p_noDC+1,sp_locColName );
+				
+				axll::ReadTable(
+				    IdentifierReference : p_Distance,
+				    RowHeaderRange      : FormatString("A2:A%i",p_noSup+1),
+				    ColumnHeaderRange   : FormatString("B1:%s1",sp_locColName),
+				    DataRange           : FormatString("B2:%s%i",sp_locColName,p_noSup+1));
+				
+				axll::CloseAllWorkBooks();
+			}
+			StringParameter sp_ArgWB {
+				Property: Input;
+			}
+			StringParameter sp_locColName;
+		}
+		Procedure pr_WriteSolutionToExcelWorkbook {
+			Arguments: (sp_ArgWB);
+			Body: {
+				axll::OpenWorkBook(sp_ArgWB);
+				
+				axll::SelectSheet("Solution");
+				axll::ColumnName(p_noDC+1,sp_locColName );
+				axll::WriteTable(
+				    IdentifierReference : v_Shipments,
+				    RowHeaderRange      : FormatString("A2:A%i",p_noSup+1),
+				    ColumnHeaderRange   : FormatString("B1:%s1",sp_locColName),
+				    DataRange           : FormatString("B2:%s%i",sp_locColName,p_noSup+1),
+				    WriteZeros          : 0 );
+				
+				axll::CloseWorkBook(WorkbookFilename :  sp_ArgWB);
+			}
+			StringParameter sp_ArgWB {
+				Property: Input;
+			}
+			StringParameter sp_locColName;
+		}
+	}
+	Section Iterative_Solve {
+		StringParameter sp_BatchExcelInputFolder;
+		Set s_FileNumbers {
+			SubsetOf: Integers;
+			Index: i_fn;
+		}
+		StringParameter sp_InputFileNames {
+			IndexDomain: i_fn;
+		}
+		Procedure pr_ExecuteBatch {
+			Body: {
+				! The input workbooks live in the project's own data folder, so this path is
+				! relative to the project and travels with it. That matters if this procedure
+				! is ever delegated to AIMMS Cloud: the Cloud session receives the project and
+				! therefore the files, whereas a folder picked on your own machine would not
+				! exist there.
+				sp_BatchExcelInputFolder := "data/" ;
+				
+				if not DirectoryExists( sp_BatchExcelInputFolder ) then
+					raise error "Input folder " + sp_BatchExcelInputFolder + " does not exist." ;
+				endif ;
+				
+				Empty s_FileNumbers ;
+				
+				DirectoryGetFiles(
+					directory       :  sp_BatchExcelInputFolder, 
+					filter          :  "*.xlsx", 
+					filenames       :  sp_InputFileNames, 
+					recursive       :  0);
+				
+				if not card( s_FileNumbers ) then
+					raise error "No input files found in " + sp_BatchExcelInputFolder + "." ;
+				endif ;
+				
+				for i_fn do !loop operation described in the article
+					sp_Workbook := sp_BatchExcelInputFolder + sp_InputFileNames(i_fn);
+				
+					!read the workbook, solve, write the solution back
+					pr_ExecuteSingleRun( sp_Workbook );
+				endfor ;
+			}
+		}
+		Procedure pr_ExecuteSingleRun {
+			Arguments: (sp_ArgWb);
+			Body: {
+				pr_ReadDataFromExcelWorkbook( sp_ArgWb );
+				pr_SolveTransportationProblem;
+				pr_WriteSolutionToExcelWorkbook( sp_ArgWb );
+			}
+			StringParameter sp_ArgWb {
+				Property: Input;
+			}
+		}
+	}
+	Procedure MainInitialization {
+		Comment: "Add initialization statements here that do NOT require any library being initialized already.";
+	}
+	Procedure PostMainInitialization {
+		Comment: {
+			"Add initialization statements here that require that the libraries are already initialized properly,
+			or add statements that require the Data Management module to be initialized."
+		}
+	}
+	Procedure MainExecution;
+	Procedure PreMainTermination {
+		Body: {
+			return 1;
+		}
+		Comment: {
+			"Add termination statements here that require all libraries to be still alive.
+			Return 1 if you allow the termination sequence to continue.
+			Return 0 if you want to cancel the termination sequence."
+		}
+	}
+	Procedure MainTermination {
+		Body: {
+			return 1;
+		}
+		Comment: {
+			"Add termination statements here that do not require all libraries to be still alive.
+			Return 1 to allow the termination sequence to continue.
+			Return 0 if you want to cancel the termination sequence.
+			It is recommended to only use the procedure PreMainTermination to cancel the termination sequence and let this procedure always return 1."
+		}
+	}
+}
