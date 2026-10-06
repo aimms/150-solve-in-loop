@@ -1,0 +1,385 @@
+## ams_version=1.0
+
+Model Main_Solve_in_Loop {
+	Comment: {
+		"Tutorial example: solve a transportation problem repeatedly from Excel workbooks.
+		This model reads supply, demand, and distance data from Excel, solves the model,
+		and writes the shipment plan back to each workbook."
+	}
+	Section Transportation_Problem {
+		Comment: {
+			"Core transportation model.
+			This section contains the business inputs, optimization model, and solve procedure."
+		}
+		DeclarationSection Data_Inputs {
+			Comment: {
+				"Input data for the transportation model.
+				These identifiers define the network nodes and the data read from Excel."
+			}
+			Set s_suppliers {
+				Index: i_supplier;
+				Comment: {
+					"Set of suppliers.
+					Each element is a shipping origin read from the Excel supply sheet."
+				}
+			}
+			Set s_dcs {
+				Index: i_dc;
+				Comment: {
+					"Set of distribution centers.
+					Each element is a destination that must receive enough shipments."
+				}
+			}
+			Parameter p_supply {
+				IndexDomain: i_supplier;
+				Comment: {
+					"Available supply per supplier.
+					This limits the total amount that can leave each supplier."
+				}
+			}
+			Parameter p_demand {
+				IndexDomain: i_dc;
+				Comment: {
+					"Required demand per distribution center.
+					The model must ship enough quantity to meet or exceed this demand."
+				}
+			}
+			Parameter p_distance {
+				IndexDomain: (i_supplier, i_dc);
+				Comment: {
+					"Transportation cost or distance from each supplier to each distribution center.
+					The objective minimizes the total shipped quantity times this value."
+				}
+			}
+		}
+		DeclarationSection Transportation_Problem_Formulation {
+			Comment: {
+				"Optimization model formulation.
+				This declaration contains decision variables, constraints, and the mathematical program."
+			}
+			Variable v_shipments {
+				IndexDomain: (i_supplier,i_dc);
+				Range: nonnegative;
+				Comment: {
+					"Decision variable: shipment quantity from each supplier to each distribution center.
+					These are the values chosen by the optimizer."
+				}
+			}
+			Variable v_objective {
+				Range: free;
+				Definition: sum( (i_supplier, i_dc), p_distance(i_supplier, i_dc) * v_shipments(i_supplier, i_dc) );
+				Comment: {
+					"Objective value variable.
+					It computes the total transportation cost of the shipment plan."
+				}
+			}
+			Constraint c_meetDemand {
+				IndexDomain: i_dc;
+				Definition: sum(i_supplier, v_shipments(i_supplier, i_dc)) >= p_demand(i_dc);
+				Comment: {
+					"Demand satisfaction constraint.
+					For each distribution center, incoming shipments must cover demand."
+				}
+			}
+			Constraint c_respectSupply {
+				IndexDomain: i_supplier;
+				Definition: sum( i_dc, v_shipments(i_supplier, i_dc)) <= p_supply(i_supplier);
+				Comment: {
+					"Supply limit constraint.
+					For each supplier, outgoing shipments cannot exceed available supply."
+				}
+			}
+			MathematicalProgram mp_stp {
+				Objective: v_objective;
+				Direction: minimize;
+				Constraints: AllConstraints;
+				Variables: AllVariables;
+				Type: Automatic;
+				Comment: {
+					"Mathematical program for the transportation problem.
+					This model minimizes total transportation cost subject to supply and demand constraints."
+				}
+			}
+		}
+		Procedure pr_solveTransportationProblem {
+			Body: {
+				! Solve the transportation model with the current input data.
+				! After this statement, the shipment variables contain the optimized plan.
+				solve mp_stp ;
+			}
+			Comment: {
+				"Solve the transportation model.
+				Use this procedure after the input data has been loaded.
+				It generates the optimal shipment plan for the current suppliers,
+				distribution centers, supplies, demands, and distances."
+			}
+		}
+	}
+	Section Excel_Connection {
+		Comment: {
+			"Excel integration.
+			This section reads model inputs from Excel and writes the optimized solution back."
+		}
+		DeclarationSection Interaction_Data {
+			Comment: "Auxiliary data used by the Excel import and export procedures.";
+			Parameter p_noSup {
+				Comment: {
+					"Number of suppliers found in the input Excel sheet.
+					Used to size the import ranges."
+				}
+			}
+			Parameter p_noDC {
+				Comment: {
+					"Number of distribution centers found in the input Excel file.
+					Used to size the import ranges."
+				}
+			}
+			StringParameter sp_workbook {
+				Comment: {
+					"Workbook path for the current batch run.
+					This stores the file being processed."
+				}
+			}
+		}
+		Procedure pr_readDataFromExcelWorkbook {
+			Arguments: (sp_loc_argWB);
+			Body: {
+				! Start from a clean network so the new workbook fully defines the case.
+				Empty s_suppliers, s_dcs ;
+				
+				! Open the workbook that contains the transportation input data.
+				axll::OpenWorkBook(sp_loc_argWB);
+				
+				! Read the small configuration block that tells us the table sizes.
+				axll::SelectSheet("Config");
+				axll::ReadSingleValue(p_noSup, "B3");
+				axll::ReadSingleValue(p_noDC,  "B4");
+				
+				! Read the supplier list and available supply.
+				axll::SelectSheet("Supply");
+				axll::ReadList(
+				        IdentifierReference    :  p_supply,
+				        RowHeaderRange         :  FormatString("A1:A%i", p_noSup),
+				        DataRange              :  FormatString("B1:B%i", p_noSup),
+				        ModeForUnknownElements : 1);
+				
+				! Read the distribution center list and required demand.
+				axll::SelectSheet("Demand");
+				axll::ReadList(
+				        IdentifierReference    :  p_demand,
+				        RowHeaderRange         :  FormatString("A1:A%i", p_noDC),
+				        DataRange              :  FormatString("B1:B%i", p_noDC),
+				        ModeForUnknownElements : 1);
+				
+				! Read the supplier-to-DC distance or cost matrix.
+				axll::SelectSheet("Dist");
+				axll::ColumnName(p_noDC+1, sp_loc_colName);
+				axll::ReadTable(
+				    IdentifierReference : p_distance,
+				    RowHeaderRange      : FormatString("A2:A%i", p_noSup+1),
+				    ColumnHeaderRange   : FormatString("B1:%s1", sp_loc_colName),
+				    DataRange           : FormatString("B2:%s%i", sp_loc_colName, p_noSup+1));
+				
+				! Close the workbook now that all input data is in the model.
+				axll::CloseAllWorkBooks();
+			}
+			Comment: {
+				"Read transportation input data from one Excel workbook.
+				This procedure loads the suppliers, distribution centers, supply,
+				demand, and distance data that define one optimization scenario.
+				The workbook structure determines how many rows and columns are read."
+			}
+			StringParameter sp_loc_argWB {
+				Property: Input;
+				Comment: {
+					"Input argument: the Excel workbook to read.
+					Pass the path of the workbook that contains one transportation case."
+				}
+			}
+			StringParameter sp_loc_colName {
+				Comment: {
+					"Local helper string that stores the Excel column name of the last
+					used destination column. It is used to build the dynamic table range."
+				}
+			}
+		}
+		Procedure pr_writeSolutionToExcelWorkbook {
+			Arguments: (sp_loc_argWB);
+			Body: {
+				! Reopen the workbook so the optimized plan can be written back.
+				axll::OpenWorkBook(sp_loc_argWB);
+				
+				! Write the shipment table to the dedicated solution sheet.
+				axll::SelectSheet("Solution");
+				axll::ColumnName(p_noDC+1, sp_loc_colName);
+				axll::WriteTable(
+				    IdentifierReference : v_shipments,
+				    RowHeaderRange      : FormatString("A2:A%i", p_noSup+1),
+				    ColumnHeaderRange   : FormatString("B1:%s1", sp_loc_colName),
+				    DataRange           : FormatString("B2:%s%i", sp_loc_colName, p_noSup+1),
+				    WriteZeros          : 0 );
+				
+				! Save and close the workbook after exporting the solution.
+				axll::CloseWorkBook(WorkbookFilename : sp_loc_argWB);
+			}
+			Comment: {
+				"Write the optimized shipment plan back to one Excel workbook.
+				This procedure exports the shipment decision variable to the solution
+				sheet so the result can be reviewed outside the AIMMS model."
+			}
+			StringParameter sp_loc_argWB {
+				Property: Input;
+				Comment: {
+					"Input argument: the Excel workbook that will receive the solution.
+					Usually this is the same workbook that provided the input data."
+				}
+			}
+			StringParameter sp_loc_colName {
+				Comment: {
+					"Local helper string that stores the Excel column name of the last
+					solution column so the export range can be constructed."
+				}
+			}
+		}
+	}
+	Section Iterative_Solve {
+		Comment: {
+			"Batch execution support.
+			This section loops over multiple Excel input files and solves them one by one."
+		}
+		StringParameter sp_batchExcelInputFolder {
+			Comment: {
+				"Folder that contains the batch of Excel input workbooks.
+				The folder is relative to the project directory."
+			}
+		}
+		Set s_fileNumbers {
+			SubsetOf: Integers;
+			Index: i_fn;
+			Comment: {
+				"Set of file indices returned by DirectoryGetFiles.
+				Used to iterate over the list of workbook names."
+			}
+		}
+		StringParameter sp_inputFileNames {
+			IndexDomain: i_fn;
+			Comment: {
+				"Workbook file names found in the batch input folder.
+				Indexed by the generated file number set."
+			}
+		}
+		Procedure pr_executeBatch {
+			Body: {
+				! Use the project's data folder as the default batch input location.
+				! Because the path is project-relative, it travels with the model.
+				sp_batchExcelInputFolder := "data/" ;
+				
+				! Stop early if the expected folder is missing.
+				if not DirectoryExists( sp_batchExcelInputFolder ) then
+				        raise error "Input folder " + sp_batchExcelInputFolder + " does not exist." ;
+				endif ;
+				
+				! Clear the generated file index set before scanning the folder.
+				Empty s_fileNumbers ;
+				
+				! Collect all Excel workbooks that should be processed in this batch run.
+				DirectoryGetFiles(
+				        directory       :  sp_batchExcelInputFolder,
+				        filter          :  "*.xlsx",
+				        filenames       :  sp_inputFileNames,
+				        recursive       :  0);
+				
+				! A batch run without files is usually a data preparation issue.
+				if not card( s_fileNumbers ) then
+				        raise error "No input files found in " + sp_batchExcelInputFolder + "." ;
+				endif ;
+				
+				! Process each workbook from start to finish.
+				for i_fn do
+				        sp_workbook := sp_batchExcelInputFolder + sp_inputFileNames(i_fn);
+				
+				        ! Each run reads inputs, solves the model, and writes results back.
+				        pr_executeSingleRun( sp_workbook );
+				endfor ;
+			}
+			Comment: {
+				"Execute the transportation workflow for every workbook in the batch folder.
+				This procedure is the high-level automation entry point: it finds all
+				Excel input files, then reads, solves, and writes back each scenario.
+				Use it when you want to solve many similar cases in one run."
+			}
+		}
+		Procedure pr_executeSingleRun {
+			Arguments: (sp_loc_argWb);
+			Body: {
+				! Read one workbook into the model.
+				pr_readDataFromExcelWorkbook( sp_loc_argWb );
+				
+				! Solve the transportation problem for the imported data.
+				pr_solveTransportationProblem;
+				
+				! Export the optimized shipment plan back to the same workbook.
+				pr_writeSolutionToExcelWorkbook( sp_loc_argWb );
+			}
+			Comment: {
+				"Execute one complete transportation workflow for a single workbook.
+				This is the simplest end-to-end pipeline in the model:
+				read inputs, solve the optimization model, and write the solution back."
+			}
+			StringParameter sp_loc_argWb {
+				Property: Input;
+				Comment: {
+					"Input argument: the workbook processed by this single run.
+					The procedure reads from it, solves, and writes the result back."
+				}
+			}
+		}
+	}
+	Procedure MainInitialization {
+		Comment: {
+			"Application startup hook.
+			Use this procedure for initialization logic that should run when the
+			application starts and that does not depend on other libraries."
+		}
+	}
+	Procedure PostMainInitialization {
+		Comment: {
+			"Post-startup hook.
+			Use this procedure for initialization logic that should run after
+			libraries and dependent components have been initialized."
+		}
+	}
+	Procedure MainExecution {
+		Body: {
+			! Run the batch workflow as the main application action.
+			pr_executeBatch;
+		}
+		Comment: {
+			"Main execution entry point of the application.
+			This procedure delegates to the batch workflow and is the natural
+			place to connect the app\'s primary run action."
+		}
+	}
+	Procedure PreMainTermination {
+		Body: {
+			! Return 1 to allow the application to terminate normally.
+			return 1;
+		}
+		Comment: {
+			"Pre-termination hook.
+			Use this procedure for checks that must happen before shutdown.
+			Returning 1 allows the application to close."
+		}
+	}
+	Procedure MainTermination {
+		Body: {
+			! Return 1 after any final cleanup has been completed.
+			return 1;
+		}
+		Comment: {
+			"Termination hook.
+			Use this procedure for final cleanup that should happen as the
+			application closes."
+		}
+	}
+}
